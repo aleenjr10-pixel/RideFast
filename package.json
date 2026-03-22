@@ -1,0 +1,19 @@
+{
+  "name": "rideshare",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "customer": "yarn workspace @rideshare/customer start",
+    "driver": "yarn workspace @rideshare/driver start",
+    "admin": "yarn workspace @rideshare/admin dev"
+  },
+  "dependencies": {
+    "expo": "^54.0.33",
+    "react-dom": "18.2.0",
+    "react-native-web": "~0.19.10"
+  }
+}
