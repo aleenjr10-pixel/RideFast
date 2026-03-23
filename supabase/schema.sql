@@ -41,6 +41,18 @@ begin
     new.raw_user_meta_data->>'phone',
     coalesce(new.raw_user_meta_data->>'role', 'customer')
   );
+  if new.raw_user_meta_data->>'role' = 'driver' then
+    insert into public.drivers (user_id, full_name, phone, vehicle_type, vehicle_plate, vehicle_model, vehicle_color)
+    values (
+      new.id,
+      new.raw_user_meta_data->>'full_name',
+      new.raw_user_meta_data->>'phone',
+      coalesce(new.raw_user_meta_data->>'vehicle_type', 'economy'),
+      coalesce(new.raw_user_meta_data->>'vehicle_plate', ''),
+      coalesce(new.raw_user_meta_data->>'vehicle_model', ''),
+      new.raw_user_meta_data->>'vehicle_color'
+    );
+  end if;
   return new;
 end;
 $$;
@@ -50,19 +62,23 @@ create trigger on_auth_user_created
 
 -- ─── Drivers ─────────────────────────────────────────────────────────────────
 create table public.drivers (
-  id             uuid default gen_random_uuid() primary key,
-  user_id        uuid references auth.users(id) on delete cascade unique not null,
-  full_name      text not null,
-  phone          text,
-  avatar_url     text,
-  vehicle_type   text not null check (vehicle_type in ('economy', 'comfort', 'premium')),
-  vehicle_plate  text not null,
-  vehicle_model  text not null,
-  status         text not null default 'offline' check (status in ('online', 'offline', 'in_ride')),
-  rating         numeric(3,2) not null default 5.0,
-  total_trips    int not null default 0,
-  location       jsonb,           -- { latitude, longitude }
-  created_at     timestamptz default now()
+  id                  uuid default gen_random_uuid() primary key,
+  user_id             uuid references auth.users(id) on delete cascade unique not null,
+  full_name           text not null,
+  phone               text,
+  avatar_url          text,
+  vehicle_type        text not null check (vehicle_type in ('economy', 'comfort', 'premium')),
+  vehicle_plate       text not null,
+  vehicle_model       text not null,
+  vehicle_color       text,
+  documents           jsonb default '{}',  -- { license_url, id_card_url }
+  onboarding_complete boolean not null default false,
+  approved            boolean not null default false,
+  status              text not null default 'offline' check (status in ('online', 'offline', 'in_ride')),
+  rating              numeric(3,2) not null default 5.0,
+  total_trips         int not null default 0,
+  location            jsonb,               -- { latitude, longitude }
+  created_at          timestamptz default now()
 );
 alter table public.drivers enable row level security;
 
@@ -296,6 +312,23 @@ select cron.schedule(
     select public.dispatch_nearest_driver(id) from expired;
   $$
 );
+
+-- ─── Storage ─────────────────────────────────────────────────────────────────
+insert into storage.buckets (id, name, public)
+  values ('driver-documents', 'driver-documents', false)
+  on conflict do nothing;
+
+create policy "Drivers can upload own documents"
+  on storage.objects for insert
+  with check (bucket_id = 'driver-documents' and auth.uid()::text = (storage.foldername(name))[1]);
+
+create policy "Drivers can read own documents"
+  on storage.objects for select
+  using (bucket_id = 'driver-documents' and auth.uid()::text = (storage.foldername(name))[1]);
+
+create policy "Admins can read all driver documents"
+  on storage.objects for select
+  using (bucket_id = 'driver-documents' and public.is_admin());
 
 -- ─── Realtime ────────────────────────────────────────────────────────────────
 -- Enable realtime for these tables in Supabase dashboard:

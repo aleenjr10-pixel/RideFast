@@ -6,6 +6,7 @@ import { OrdersTable } from '../components/OrdersTable';
 import { DriversTable } from '../components/DriversTable';
 import { LiveMap } from '../components/LiveMap';
 import SettingsPage from './SettingsPage';
+import DriversPage from './DriversPage';
 
 type Tab = 'overview' | 'drivers' | 'trips' | 'settings';
 
@@ -45,10 +46,13 @@ export default function DashboardPage() {
               fontSize: 14, fontWeight: tab === t ? 600 : 400,
               background: tab === t ? '#f3f4f6' : 'transparent',
               color: tab === t ? '#111' : '#666',
-              marginBottom: 4, textTransform: 'capitalize',
+              marginBottom: 4,
             }}
           >
-            {t === 'overview' ? '📊 Overview' : t === 'drivers' ? '🚗 Soferi' : t === 'trips' ? '🗺️ Curse' : '⚙️ Setari'}
+            {t === 'overview' ? '📊 Overview'
+              : t === 'drivers' ? '🚗 Soferi'
+              : t === 'trips' ? '🗺️ Curse'
+              : '⚙️ Setari'}
           </button>
         ))}
 
@@ -93,10 +97,8 @@ export default function DashboardPage() {
 
         {tab === 'drivers' && (
           <>
-            <h2 style={pageTitle}>Drivers</h2>
-            <div style={card}>
-              <DriversTable drivers={activeDrivers} />
-            </div>
+            <h2 style={pageTitle}>Soferi</h2>
+            <DriversPage />
           </>
         )}
 

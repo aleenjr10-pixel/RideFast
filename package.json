@@ -9,11 +9,15 @@
   "scripts": {
     "customer": "yarn workspace @rideshare/customer start",
     "driver": "yarn workspace @rideshare/driver start",
-    "admin": "yarn workspace @rideshare/admin dev"
+    "admin": "yarn workspace @rideshare/admin dev",
+    "android": "expo run:android",
+    "ios": "expo run:ios"
   },
   "dependencies": {
     "expo": "^54.0.33",
     "react-dom": "18.2.0",
-    "react-native-web": "~0.19.10"
+    "react-native-web": "~0.19.10",
+    "react": "19.1.0",
+    "react-native": "0.81.5"
   }
 }

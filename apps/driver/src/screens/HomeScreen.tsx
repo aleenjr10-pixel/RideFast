@@ -6,6 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CURRENCY, ORDER_STATUS_LABELS } from '@rideshare/shared';
 import { useAuth } from '../hooks/useAuth';
 import { useDriver } from '../hooks/useDriver';
+import Drawer from '../components/Drawer';
 
 const GMAPS_KEY = process.env.EXPO_PUBLIC_GOOGLE_MAPS_KEY!;
 
@@ -31,8 +32,9 @@ function decodePolyline(encoded: string): LatLng[] {
   return points;
 }
 
-export default function HomeScreen() {
+export default function HomeScreen({ navigation }: any) {
   const { session, signOut } = useAuth();
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const {
     status, incomingOrder, activeOrder, dispatchSecondsLeft,
     goOnline, goOffline, acceptOrder, declineOrder,
@@ -44,6 +46,13 @@ export default function HomeScreen() {
   const [routePoints, setRoutePoints] = useState<LatLng[]>([]);
 
   const isOnline = status !== 'offline';
+
+  // Daca vine o cursa, soferul e online si se afla pe alt ecran, navigam inapoi automat
+  useEffect(() => {
+    if (incomingOrder && isOnline && !navigation.isFocused()) {
+      navigation.navigate('Home');
+    }
+  }, [incomingOrder]);
 
   // Wave animation
   const wave1 = useRef(new Animated.Value(0)).current;
@@ -183,10 +192,19 @@ export default function HomeScreen() {
             {status === 'offline' ? 'Offline' : status === 'online' ? 'Online' : 'In cursa'}
           </Text>
         </View>
-        <TouchableOpacity style={styles.signOutBtn} onPress={signOut}>
-          <Text style={styles.signOutText}>Iesi</Text>
+        <TouchableOpacity style={styles.menuBtn} onPress={() => setDrawerOpen(true)}>
+          <Text style={styles.menuBtnText}>☰</Text>
         </TouchableOpacity>
       </View>
+
+      <Drawer
+        visible={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        driverName={session?.user.user_metadata?.full_name ?? ''}
+        driverStatus={status}
+        onProfile={() => navigation.navigate('Profile')}
+        onSignOut={signOut}
+      />
 
       {/* Incoming order card */}
       {incomingOrder && (
@@ -288,11 +306,11 @@ const styles = StyleSheet.create({
   },
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   statusText: { fontSize: 13, fontWeight: '600', color: '#111' },
-  signOutBtn: {
+  menuBtn: {
     backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 20,
     paddingHorizontal: 14, paddingVertical: 8, ...SHADOW,
   },
-  signOutText: { fontSize: 13, color: '#555', fontWeight: '600' },
+  menuBtnText: { fontSize: 18, color: '#111' },
 
   floatingCard: {
     position: 'absolute', left: 12, right: 12,

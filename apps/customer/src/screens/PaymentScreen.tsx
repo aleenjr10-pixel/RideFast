@@ -53,7 +53,7 @@ export default function PaymentScreen({
   const total = +(baseFare + kmCost + minCost).toFixed(2);
 
   return (
-    <Modal visible={visible} animationType="slide" transparent>
+    <Modal visible={visible} animationType="slide" transparent onRequestClose={onCancel}>
       <View style={styles.overlay}>
         <TouchableOpacity style={styles.backdrop} onPress={onCancel} />
         <Animated.View style={[styles.sheet, { paddingBottom: insets.bottom + 12, transform: [{ translateY }] }]}>

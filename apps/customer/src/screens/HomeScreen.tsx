@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity,
   StyleSheet, ActivityIndicator, ScrollView, ImageBackground,
+  BackHandler,
 } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, Region } from 'react-native-maps';
 import { GooglePlacesAutocomplete } from 'react-native-google-places-autocomplete';
@@ -76,7 +77,7 @@ export default function HomeScreen() {
 
   const [selectedVehicle, setSelectedVehicle] = useState<VehicleType>('economy');
   const [error, setError] = useState('');
-  const [region, setRegion] = useState(DEFAULT_REGION);
+  const regionRef = useRef(DEFAULT_REGION);
   const [userLocation, setUserLocation] = useState<LatLng | null>(null);
 
   const [pickup, setPickup] = useState<Address | null>(null);
@@ -100,13 +101,22 @@ export default function HomeScreen() {
   const bothSelected = !!(pickup && dropoff);
 
   useEffect(() => {
+    const handler = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (selectMode) { cancelSelectMode(); return true; }
+      if (showPayment) { setShowPayment(false); return true; }
+      return false;
+    });
+    return () => handler.remove();
+  }, [selectMode, showPayment]);
+
+  useEffect(() => {
     (async () => {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') return;
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       const coords = { latitude: loc.coords.latitude, longitude: loc.coords.longitude };
       setUserLocation(coords);
-      setRegion({ ...coords, latitudeDelta: 0.01, longitudeDelta: 0.01 });
+      mapRef.current?.animateToRegion({ ...coords, latitudeDelta: 0.01, longitudeDelta: 0.01 }, 500);
     })();
   }, []);
 
@@ -166,6 +176,14 @@ export default function HomeScreen() {
     } catch (e) { console.warn('Route fetch failed', e); }
   };
 
+  const cancelSelectMode = () => {
+    setSelectMode(null);
+    setTimeout(() => {
+      if (pickup) pickupRef.current?.setAddressText(pickup.label);
+      if (dropoff) dropoffRef.current?.setAddressText(dropoff.label);
+    }, 150);
+  };
+
   const enterSelectMode = (mode: SelectMode) => {
     setSelectMode(mode);
     setPinLabel('');
@@ -175,7 +193,7 @@ export default function HomeScreen() {
   };
 
   const onMapRegionChange = (r: Region) => {
-    setRegion(r);
+    regionRef.current = r;
     if (!selectMode) return;
     setIsGeocoding(true);
     if (geocodeTimer.current) clearTimeout(geocodeTimer.current);
@@ -189,17 +207,23 @@ export default function HomeScreen() {
   const confirmMapSelection = async () => {
     if (!selectMode) return;
     setIsGeocoding(true);
-    const label = pinLabel || await reverseGeocode(region.latitude, region.longitude);
-    const addr: Address = { label, lat: region.latitude, lng: region.longitude };
-    if (selectMode === 'pickup') {
-      setPickup(addr);
-      pickupRef.current?.setAddressText(label);
-    } else {
-      setDropoff(addr);
-      dropoffRef.current?.setAddressText(label);
-    }
+    const label = pinLabel || await reverseGeocode(regionRef.current.latitude, regionRef.current.longitude);
+    const addr: Address = { label, lat: regionRef.current.latitude, lng: regionRef.current.longitude };
+    const mode = selectMode;
+    if (mode === 'pickup') setPickup(addr);
+    else setDropoff(addr);
     setIsGeocoding(false);
     setSelectMode(null);
+    // Inputs re-mount after selectMode becomes null — restore both fields
+    setTimeout(() => {
+      if (mode === 'pickup') {
+        pickupRef.current?.setAddressText(label);
+        if (dropoff) dropoffRef.current?.setAddressText(dropoff.label);
+      } else {
+        dropoffRef.current?.setAddressText(label);
+        if (pickup) pickupRef.current?.setAddressText(pickup.label);
+      }
+    }, 150);
   };
 
   const centerOnUser = () => {
@@ -242,7 +266,7 @@ export default function HomeScreen() {
     return (
       <View style={styles.root}>
         <MapView ref={mapRef} style={StyleSheet.absoluteFillObject}
-          provider={PROVIDER_GOOGLE} region={region} showsUserLocation>
+          provider={PROVIDER_GOOGLE} initialRegion={DEFAULT_REGION} showsUserLocation>
           <Marker coordinate={{ latitude: activeOrder.pickup.lat, longitude: activeOrder.pickup.lng }} pinColor="#22c55e" />
           <Marker coordinate={{ latitude: activeOrder.dropoff.lat, longitude: activeOrder.dropoff.lng }} pinColor="#ef4444" />
           {routePoints.length > 0 && (
@@ -297,7 +321,7 @@ export default function HomeScreen() {
         ref={mapRef}
         style={StyleSheet.absoluteFillObject}
         provider={PROVIDER_GOOGLE}
-        region={region}
+        initialRegion={DEFAULT_REGION}
         showsUserLocation
         showsMyLocationButton={false}
         onRegionChangeComplete={onMapRegionChange}
@@ -317,8 +341,11 @@ export default function HomeScreen() {
       {selectMode && (
         <>
           <View pointerEvents="none" style={styles.pinContainer}>
-            <Text style={styles.pinEmoji}>{selectMode === 'pickup' ? '🟢' : '🔴'}</Text>
-            <View style={styles.pinShadow} />
+            <View style={[styles.pinWrapper, { transform: [{ translateY: -22 }] }]}>
+              <View style={[styles.pinHead, { backgroundColor: selectMode === 'pickup' ? '#22c55e' : '#ef4444' }]} />
+              <View style={[styles.pinTip, { borderTopColor: selectMode === 'pickup' ? '#22c55e' : '#ef4444' }]} />
+              <View style={styles.pinShadow} />
+            </View>
           </View>
           <View style={[styles.floatingPanel, styles.topFloating, { marginTop: insets.top + 12 }]}>
             <Text style={styles.selectBannerTitle}>
@@ -330,7 +357,7 @@ export default function HomeScreen() {
             }
           </View>
           <View style={[styles.selectActions, { marginBottom: insets.bottom + 12 }]}>
-            <TouchableOpacity style={styles.cancelSelectBtn} onPress={() => setSelectMode(null)}>
+            <TouchableOpacity style={styles.cancelSelectBtn} onPress={cancelSelectMode}>
               <Text style={styles.cancelSelectText}>Anuleaza</Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -583,8 +610,24 @@ const styles = StyleSheet.create({
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     justifyContent: 'center', alignItems: 'center',
   },
-  pinEmoji: { fontSize: 36, marginBottom: -4 },
-  pinShadow: { width: 10, height: 4, borderRadius: 5, backgroundColor: 'rgba(0,0,0,0.2)' },
+  pinWrapper: { alignItems: 'center' },
+  pinHead: {
+    width: 30, height: 30, borderRadius: 15,
+    borderWidth: 3, borderColor: '#fff',
+    shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 }, elevation: 5,
+  },
+  pinTip: {
+    width: 0, height: 0,
+    borderLeftWidth: 7, borderRightWidth: 7, borderTopWidth: 12,
+    borderStyle: 'solid',
+    borderLeftColor: 'transparent', borderRightColor: 'transparent',
+    marginTop: -3, alignSelf: 'center',
+  },
+  pinShadow: {
+    width: 12, height: 5, borderRadius: 6,
+    backgroundColor: 'rgba(0,0,0,0.2)', marginTop: 3,
+  },
   selectBannerTitle: { fontSize: 13, color: '#888', fontWeight: '600' },
   selectBannerAddr: { fontSize: 14, color: '#111', marginTop: 4, fontWeight: '500' },
   selectActions: {
