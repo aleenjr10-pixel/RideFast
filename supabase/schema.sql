@@ -90,6 +90,19 @@ create policy "Admins can read all drivers"
   on public.drivers for select using (public.is_admin());
 create policy "Admins can update all drivers"
   on public.drivers for update using (public.is_admin());
+create or replace function public.customer_has_ride_with_driver(p_driver_id uuid)
+returns boolean language sql security definer stable as $$
+  select exists (
+    select 1 from public.orders
+    where customer_id = auth.uid()
+      and driver_id = p_driver_id
+      and status in ('accepted', 'arriving', 'in_progress', 'completed')
+  );
+$$;
+
+create policy "Customers can read basic driver info"
+  on public.drivers for select
+  using (public.customer_has_ride_with_driver(id));
 
 -- ─── Orders ──────────────────────────────────────────────────────────────────
 create table public.orders (
@@ -161,6 +174,22 @@ create policy "Users can insert ratings for their orders"
   on public.ratings for insert with check (auth.uid() = from_user_id);
 create policy "Users can read ratings about them"
   on public.ratings for select using (auth.uid() = to_user_id or auth.uid() = from_user_id);
+
+-- Increment driver total_trips when an order is completed
+create or replace function public.increment_driver_trips()
+returns trigger language plpgsql security definer as $$
+begin
+  if new.status = 'completed' and old.status != 'completed' and new.driver_id is not null then
+    update public.drivers
+    set total_trips = total_trips + 1
+    where id = new.driver_id;
+  end if;
+  return new;
+end;
+$$;
+create trigger on_order_completed
+  after update on public.orders
+  for each row execute procedure public.increment_driver_trips();
 
 -- Update driver rating after new rating is inserted
 create or replace function public.update_driver_rating()

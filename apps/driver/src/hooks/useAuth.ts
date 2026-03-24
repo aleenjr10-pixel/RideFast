@@ -9,8 +9,9 @@ export function useAuth() {
   const resolveSession = async (s: typeof session) => {
     if (!s) { setSession(null); return; }
     if (s.user?.user_metadata?.role === 'driver') {
-      const { data: driver } = await supabase
+      const { data: driver, error } = await supabase
         .from('drivers').select('approved').eq('user_id', s.user.id).single();
+      if (error) { console.warn('[resolveSession] drivers query error:', error.message); setSession(null); return; }
       if (!driver?.approved) { setSession(null); return; }
     }
     setSession(s);
@@ -31,11 +32,15 @@ export function useAuth() {
       await supabase.auth.signOut();
       throw new Error('Access denied. Driver accounts only.');
     }
-    const { data: driver } = await supabase
+    const { data: driver, error: driverError } = await supabase
       .from('drivers')
       .select('approved')
       .eq('user_id', data.user.id)
       .single();
+    if (driverError) {
+      await supabase.auth.signOut();
+      throw new Error('Nu s-a putut verifica statusul contului. Incearca din nou.');
+    }
     if (!driver?.approved) {
       await supabase.auth.signOut();
       throw new Error('PENDING_APPROVAL');

@@ -2,13 +2,14 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   View, Text, TouchableOpacity,
   StyleSheet, ActivityIndicator, ScrollView, ImageBackground,
-  BackHandler,
+  BackHandler, Modal,
 } from 'react-native';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE, Region } from 'react-native-maps';
 import { GooglePlacesAutocomplete } from 'react-native-google-places-autocomplete';
 import * as Location from 'expo-location';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { VEHICLE_OPTIONS, estimatePrice, ORDER_STATUS_LABELS, CURRENCY } from '@rideshare/shared';
+import { VEHICLE_OPTIONS, estimatePrice, ORDER_STATUS_LABELS, CURRENCY, supabase } from '@rideshare/shared';
+import BottomNav, { BOTTOM_NAV_HEIGHT } from '../components/BottomNav';
 import type { VehicleType, Address } from '@rideshare/shared';
 import { useOrders } from '../hooks/useOrders';
 import { useAuth } from '../hooks/useAuth';
@@ -24,6 +25,31 @@ const DEFAULT_REGION = {
 
 type LatLng = { latitude: number; longitude: number };
 type SelectMode = 'pickup' | 'dropoff' | null;
+
+interface DriverInfo {
+  user_id: string;
+  full_name: string;
+  phone: string;
+  vehicle_model: string;
+  vehicle_color: string;
+  vehicle_plate: string;
+  rating: number;
+}
+
+interface RatingData {
+  orderId: string;
+  driverUserId: string;
+  driverName: string;
+  driverInitials: string;
+  finalPrice: number;
+}
+
+const ACTIVE_STATUS_LABEL: Record<string, string> = {
+  pending:     'Cautam soferul tau...',
+  accepted:    'Soferul se indreapta spre tine',
+  arriving:    'Soferul a ajuns la punct de preluare',
+  in_progress: 'Esti in cursa',
+};
 
 function decodePolyline(encoded: string): LatLng[] {
   const points: LatLng[] = [];
@@ -66,13 +92,12 @@ async function reverseGeocode(lat: number, lng: number): Promise<string> {
   }
 }
 
-// Approximate heights for map padding
 const TOP_PANEL_HEIGHT = 130;
 const BOTTOM_PANEL_HEIGHT = 300;
 
-export default function HomeScreen() {
-  const { session, signOut } = useAuth();
-  const { activeOrder, loading, requestRide, cancelOrder } = useOrders(session?.user.id);
+export default function HomeScreen({ navigation }: any) {
+  const { session } = useAuth();
+  const { activeOrder, completedOrder, dismissCompletedOrder, loading, requestRide, cancelOrder } = useOrders(session?.user.id);
   const insets = useSafeAreaInsets();
 
   const [selectedVehicle, setSelectedVehicle] = useState<VehicleType>('economy');
@@ -91,6 +116,11 @@ export default function HomeScreen() {
   const [pinLabel, setPinLabel] = useState('');
   const [isGeocoding, setIsGeocoding] = useState(false);
   const geocodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [driverInfo, setDriverInfo] = useState<DriverInfo | null>(null);
+  const [ratingData, setRatingData] = useState<RatingData | null>(null);
+  const [selectedRating, setSelectedRating] = useState(5);
+  const [ratingSubmitting, setRatingSubmitting] = useState(false);
 
   const mapRef = useRef<MapView>(null);
   const pickupRef = useRef<any>(null);
@@ -132,12 +162,63 @@ export default function HomeScreen() {
     if (!dropoff) setDropoff(activeOrder.dropoff);
   }, [activeOrder?.id]);
 
-  // Fetch route when active order is loaded (e.g. app restart with existing order)
+  // Fetch route when active order is loaded (e.g. app restart)
   useEffect(() => {
     if (!activeOrder) return;
-    if (routePoints.length > 0) return; // already have it from the booking flow
+    if (routePoints.length > 0) return;
     fetchRoute(activeOrder.pickup, activeOrder.dropoff);
   }, [activeOrder?.id]);
+
+  // Fetch driver info when order is accepted
+  useEffect(() => {
+    if (!activeOrder?.driver_id) { setDriverInfo(null); return; }
+    supabase
+      .from('drivers')
+      .select('user_id, full_name, phone, vehicle_model, vehicle_color, vehicle_plate, rating')
+      .eq('id', activeOrder.driver_id)
+      .single()
+      .then(({ data, error }) => {
+        if (error) console.warn('[driverInfo] fetch error:', error.message);
+        if (data) setDriverInfo(data as DriverInfo);
+      });
+  }, [activeOrder?.driver_id]);
+
+  // Capture rating data when order completes (before driverInfo is cleared)
+  useEffect(() => {
+    if (!completedOrder) return;
+    const di = driverInfo;
+    setRatingData({
+      orderId: completedOrder.id,
+      driverUserId: di?.user_id ?? '',
+      driverName: di?.full_name ?? 'Soferul tau',
+      driverInitials: di?.full_name?.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase() ?? '?',
+      finalPrice: completedOrder.final_price ?? completedOrder.estimated_price,
+    });
+    setSelectedRating(0);
+    dismissCompletedOrder();
+    hadActiveOrder.current = false; // prevent address restore on completion
+    setPickup(null); setPickupKey((k) => k + 1);
+    setDropoff(null); setDropoffKey((k) => k + 1);
+    setRoutePoints([]); setRouteInfo(null);
+  }, [completedOrder]);
+
+  const submitRating = async () => {
+    if (!ratingData || !session) return;
+    if (selectedRating === 0) { setRatingData(null); return; }
+    setRatingSubmitting(true);
+    try {
+      await supabase.from('ratings').insert({
+        order_id: ratingData.orderId,
+        from_user_id: session.user.id,
+        to_user_id: ratingData.driverUserId,
+        score: selectedRating,
+      });
+    } catch (e) { console.warn('[submitRating]', e); }
+    finally {
+      setRatingSubmitting(false);
+      setRatingData(null);
+    }
+  };
 
   // After cancel: restore address text in autocomplete inputs
   const hadActiveOrder = useRef(false);
@@ -145,7 +226,6 @@ export default function HomeScreen() {
     if (activeOrder) { hadActiveOrder.current = true; return; }
     if (!hadActiveOrder.current) return;
     hadActiveOrder.current = false;
-    // Small delay to let the normal view mount before setting ref text
     setTimeout(() => {
       if (pickup) pickupRef.current?.setAddressText(pickup.label);
       if (dropoff) dropoffRef.current?.setAddressText(dropoff.label);
@@ -214,7 +294,6 @@ export default function HomeScreen() {
     else setDropoff(addr);
     setIsGeocoding(false);
     setSelectMode(null);
-    // Inputs re-mount after selectMode becomes null — restore both fields
     setTimeout(() => {
       if (mode === 'pickup') {
         pickupRef.current?.setAddressText(label);
@@ -261,62 +340,12 @@ export default function HomeScreen() {
     debounce: 300,
   };
 
-  // ── ACTIVE ORDER ──
-  if (activeOrder) {
-    return (
-      <View style={styles.root}>
-        <MapView ref={mapRef} style={StyleSheet.absoluteFillObject}
-          provider={PROVIDER_GOOGLE} initialRegion={DEFAULT_REGION} showsUserLocation>
-          <Marker coordinate={{ latitude: activeOrder.pickup.lat, longitude: activeOrder.pickup.lng }} pinColor="#22c55e" />
-          <Marker coordinate={{ latitude: activeOrder.dropoff.lat, longitude: activeOrder.dropoff.lng }} pinColor="#ef4444" />
-          {routePoints.length > 0 && (
-            <Polyline coordinates={routePoints} strokeColor="#111" strokeWidth={4} />
-          )}
-        </MapView>
-
-        {/* Top status badge */}
-        <View style={[styles.topBar, { marginTop: insets.top + 12 }]} pointerEvents="none">
-          <View style={styles.statusBadge}>
-            {activeOrder.status === 'pending' && (
-              <ActivityIndicator size="small" color="#111" style={{ marginRight: 8 }} />
-            )}
-            <Text style={styles.statusBadgeText}>{ORDER_STATUS_LABELS[activeOrder.status]}</Text>
-          </View>
-        </View>
-
-        {/* Bottom panel */}
-        <View style={[styles.floatingPanel, styles.bottomFloating, { marginBottom: insets.bottom + 12 }]}>
-          {/* Route */}
-          <View style={styles.activeRouteRow}>
-            <View style={[styles.dot, { backgroundColor: '#22c55e' }]} />
-            <Text style={styles.activeRouteText} numberOfLines={1}>{activeOrder.pickup.label}</Text>
-          </View>
-          <View style={styles.activeRouteLine} />
-          <View style={styles.activeRouteRow}>
-            <View style={[styles.dot, { backgroundColor: '#ef4444' }]} />
-            <Text style={styles.activeRouteText} numberOfLines={1}>{activeOrder.dropoff.label}</Text>
-          </View>
-
-          {/* Price + payment */}
-          <View style={styles.activeMeta}>
-            <Text style={styles.activePrice}>{activeOrder.estimated_price.toFixed(2)} {CURRENCY}</Text>
-            <View style={styles.cashBadge}>
-              <Text style={styles.cashBadgeText}>💵 Cash</Text>
-            </View>
-          </View>
-
-          {activeOrder.status === 'pending' && (
-            <TouchableOpacity style={styles.cancelBtn} onPress={() => cancelOrder(activeOrder.id)}>
-              <Text style={styles.cancelBtnText}>Anuleaza cursa</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      </View>
-    );
-  }
+  const driverInitials = driverInfo?.full_name
+    ?.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase() ?? '?';
 
   return (
     <View style={styles.root}>
+      {/* Full-screen map */}
       <MapView
         ref={mapRef}
         style={StyleSheet.absoluteFillObject}
@@ -326,10 +355,10 @@ export default function HomeScreen() {
         showsMyLocationButton={false}
         onRegionChangeComplete={onMapRegionChange}
       >
-        {!selectMode && pickup && (
+        {pickup && !selectMode && (
           <Marker coordinate={{ latitude: pickup.lat, longitude: pickup.lng }} pinColor="#22c55e" />
         )}
-        {!selectMode && dropoff && (
+        {dropoff && !selectMode && (
           <Marker coordinate={{ latitude: dropoff.lat, longitude: dropoff.lng }} pinColor="#ef4444" />
         )}
         {routePoints.length > 0 && !selectMode && (
@@ -337,17 +366,35 @@ export default function HomeScreen() {
         )}
       </MapView>
 
-      {/* ── MAP SELECTION MODE ── */}
+      {/* Map selection pin */}
       {selectMode && (
-        <>
-          <View pointerEvents="none" style={styles.pinContainer}>
-            <View style={[styles.pinWrapper, { transform: [{ translateY: -22 }] }]}>
-              <View style={[styles.pinHead, { backgroundColor: selectMode === 'pickup' ? '#22c55e' : '#ef4444' }]} />
-              <View style={[styles.pinTip, { borderTopColor: selectMode === 'pickup' ? '#22c55e' : '#ef4444' }]} />
-              <View style={styles.pinShadow} />
-            </View>
+        <View pointerEvents="none" style={styles.pinContainer}>
+          <View style={[styles.pinWrapper, { transform: [{ translateY: -22 }] }]}>
+            <View style={[styles.pinHead, { backgroundColor: selectMode === 'pickup' ? '#22c55e' : '#ef4444' }]} />
+            <View style={[styles.pinTip, { borderTopColor: selectMode === 'pickup' ? '#22c55e' : '#ef4444' }]} />
+            <View style={styles.pinShadow} />
           </View>
-          <View style={[styles.floatingPanel, styles.topFloating, { marginTop: insets.top + 12 }]}>
+        </View>
+      )}
+
+      {/* ── TOP PANEL (always visible) ── */}
+      <View style={[styles.floatingPanel, styles.topFloating, { marginTop: insets.top + 12 }]}>
+        {activeOrder ? (
+          // Locked address display during active order
+          <>
+            <View style={styles.inputRow}>
+              <View style={[styles.dot, { backgroundColor: '#22c55e' }]} />
+              <Text style={styles.lockedAddress} numberOfLines={1}>{activeOrder.pickup.label}</Text>
+            </View>
+            <View style={styles.divider} />
+            <View style={styles.inputRow}>
+              <View style={[styles.dot, { backgroundColor: '#ef4444' }]} />
+              <Text style={styles.lockedAddress} numberOfLines={1}>{activeOrder.dropoff.label}</Text>
+            </View>
+          </>
+        ) : selectMode ? (
+          // Map selection banner
+          <>
             <Text style={styles.selectBannerTitle}>
               {selectMode === 'pickup' ? 'Muta harta la locul de plecare' : 'Muta harta la destinatie'}
             </Text>
@@ -355,60 +402,10 @@ export default function HomeScreen() {
               ? <ActivityIndicator size="small" color="#555" style={{ marginTop: 6 }} />
               : <Text style={styles.selectBannerAddr} numberOfLines={2}>{pinLabel}</Text>
             }
-          </View>
-          <View style={[styles.selectActions, { marginBottom: insets.bottom + 12 }]}>
-            <TouchableOpacity style={styles.cancelSelectBtn} onPress={cancelSelectMode}>
-              <Text style={styles.cancelSelectText}>Anuleaza</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.confirmSelectBtn, isGeocoding && { opacity: 0.6 }]}
-              onPress={confirmMapSelection} disabled={isGeocoding}
-            >
-              <Text style={styles.confirmSelectText}>Confirma</Text>
-            </TouchableOpacity>
-          </View>
-        </>
-      )}
-
-      {/* Payment modal */}
-      {pickup && dropoff && (
-        <PaymentScreen
-          visible={showPayment}
-          pickup={pickup}
-          dropoff={dropoff}
-          vehicleType={selectedVehicle}
-          distanceKm={routeInfo?.distanceKm ?? 14.3}
-          durationMin={routeInfo?.durationMin ?? 22}
-          rates={rates}
-          loading={loading}
-          onConfirm={handleRequest}
-          onCancel={() => setShowPayment(false)}
-        />
-      )}
-
-      {/* ── NORMAL MODE ── */}
-      {!selectMode && (
-        <>
-          {/* Sign out */}
-          <TouchableOpacity
-            style={[styles.signOutBtn, { top: insets.top + 12, right: 24 }]}
-            onPress={signOut}
-          >
-            <Text style={styles.signOutText}>Iesi</Text>
-          </TouchableOpacity>
-
-          {/* Locate me */}
-          {userLocation && !bothSelected && (
-            <TouchableOpacity
-              style={[styles.locateBtn, { bottom: insets.bottom + 24 }]}
-              onPress={centerOnUser}
-            >
-              <Text style={styles.locateBtnText}>⊕</Text>
-            </TouchableOpacity>
-          )}
-
-          {/* TOP floating panel — address inputs */}
-          <View style={[styles.floatingPanel, styles.topFloating, { marginTop: insets.top + 12 }]}>
+          </>
+        ) : (
+          // Editable address inputs
+          <>
             <View style={styles.inputRow}>
               <View style={[styles.dot, { backgroundColor: '#22c55e' }]} />
               <View style={{ flex: 1, zIndex: 100 }}>
@@ -462,58 +459,194 @@ export default function HomeScreen() {
                 />
               </View>
             </View>
-          </View>
+          </>
+        )}
+      </View>
 
-          {/* BOTTOM floating panel — vehicle selection */}
-          {bothSelected && (
-            <View style={[styles.floatingPanel, styles.bottomFloating, { marginBottom: insets.bottom + 12 }]}>
-              {routeInfo && (
-                <Text style={styles.routeInfoText}>
-                  {routeInfo.distanceKm.toFixed(1)} km · ~{Math.round(routeInfo.durationMin)} min
+      {/* Map selection confirm/cancel actions */}
+      {selectMode && (
+        <View style={[styles.selectActions, { marginBottom: insets.bottom + BOTTOM_NAV_HEIGHT + 12 }]}>
+          <TouchableOpacity style={styles.cancelSelectBtn} onPress={cancelSelectMode}>
+            <Text style={styles.cancelSelectText}>Anuleaza</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.confirmSelectBtn, isGeocoding && { opacity: 0.6 }]}
+            onPress={confirmMapSelection} disabled={isGeocoding}
+          >
+            <Text style={styles.confirmSelectText}>Confirma</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Payment modal */}
+      {pickup && dropoff && !activeOrder && (
+        <PaymentScreen
+          visible={showPayment}
+          pickup={pickup}
+          dropoff={dropoff}
+          vehicleType={selectedVehicle}
+          distanceKm={routeInfo?.distanceKm ?? 14.3}
+          durationMin={routeInfo?.durationMin ?? 22}
+          rates={rates}
+          loading={loading}
+          onConfirm={handleRequest}
+          onCancel={() => setShowPayment(false)}
+        />
+      )}
+
+      {/* ── BOTTOM PANEL ── */}
+      {!selectMode && (
+        activeOrder ? (
+          // ── Active order panel ──
+          <View style={[styles.floatingPanel, styles.bottomFloating, { marginBottom: insets.bottom + BOTTOM_NAV_HEIGHT + 12 }]}>
+            {activeOrder.status === 'pending' ? (
+              // Searching for driver
+              <>
+                <View style={styles.searchingRow}>
+                  <ActivityIndicator size="small" color="#111" style={{ marginRight: 10 }} />
+                  <Text style={styles.searchingText}>Cautam soferul tau...</Text>
+                </View>
+                <Text style={styles.searchingSubtext}>Te rugam sa astepti un moment</Text>
+                <View style={styles.priceRow}>
+                  <Text style={styles.activePrice}>{activeOrder.estimated_price.toFixed(2)} {CURRENCY}</Text>
+                  <View style={styles.cashBadge}>
+                    <Text style={styles.cashBadgeText}>💵 Cash</Text>
+                  </View>
+                </View>
+                <TouchableOpacity style={styles.cancelBtn} onPress={() => cancelOrder(activeOrder.id)}>
+                  <Text style={styles.cancelBtnText}>Anuleaza cursa</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              // Driver found
+              <>
+                <Text style={styles.orderStatusLabel}>
+                  {ACTIVE_STATUS_LABEL[activeOrder.status] ?? ORDER_STATUS_LABELS[activeOrder.status]}
                 </Text>
-              )}
-              <Text style={styles.sectionLabel}>Alege masina</Text>
-              <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-                {VEHICLE_OPTIONS.map((v) => {
-                  const price = estimatePrice(v.type, routeInfo?.distanceKm ?? 14.3, routeInfo?.durationMin ?? 22, rates);
-                  const isSelected = selectedVehicle === v.type;
-                  return (
-                    <TouchableOpacity
-                      key={v.type}
-                      style={[styles.vehicleCard, isSelected && styles.vehicleCardSelected]}
-                      onPress={() => setSelectedVehicle(v.type)}
-                      activeOpacity={0.85}
+                {driverInfo ? (
+                  <View style={styles.driverCard}>
+                    <View style={styles.driverAvatar}>
+                      <Text style={styles.driverAvatarText}>{driverInitials}</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.driverName}>{driverInfo.full_name}</Text>
+                      <Text style={styles.driverVehicle} numberOfLines={1}>
+                        {driverInfo.vehicle_model} · {driverInfo.vehicle_color}
+                      </Text>
+                    </View>
+                    <View style={styles.ratingBadge}>
+                      <Text style={styles.ratingText}>★ {driverInfo.rating?.toFixed(1)}</Text>
+                    </View>
+                  </View>
+                ) : (
+                  <ActivityIndicator size="small" color="#111" style={{ marginVertical: 12 }} />
+                )}
+                {driverInfo && (
+                  <View style={styles.plateRow}>
+                    <Text style={styles.plateText}>{driverInfo.vehicle_plate}</Text>
+                    <View style={styles.priceRightRow}>
+                      <Text style={styles.activePrice}>{activeOrder.estimated_price.toFixed(2)} {CURRENCY}</Text>
+                      <View style={styles.cashBadge}>
+                        <Text style={styles.cashBadgeText}>💵 Cash</Text>
+                      </View>
+                    </View>
+                  </View>
+                )}
+              </>
+            )}
+          </View>
+        ) : bothSelected ? (
+          // ── Vehicle selection panel ──
+          <View style={[styles.floatingPanel, styles.bottomFloating, { marginBottom: insets.bottom + BOTTOM_NAV_HEIGHT + 12 }]}>
+            {routeInfo && (
+              <Text style={styles.routeInfoText}>
+                {routeInfo.distanceKm.toFixed(1)} km · ~{Math.round(routeInfo.durationMin)} min
+              </Text>
+            )}
+            <Text style={styles.sectionLabel}>Alege masina</Text>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
+              {VEHICLE_OPTIONS.map((v) => {
+                const price = estimatePrice(v.type, routeInfo?.distanceKm ?? 14.3, routeInfo?.durationMin ?? 22, rates);
+                const isSelected = selectedVehicle === v.type;
+                return (
+                  <TouchableOpacity
+                    key={v.type}
+                    style={[styles.vehicleCard, isSelected && styles.vehicleCardSelected]}
+                    onPress={() => setSelectedVehicle(v.type)}
+                    activeOpacity={0.85}
+                  >
+                    <ImageBackground
+                      source={{ uri: v.image }}
+                      style={styles.vehicleCardBg}
+                      imageStyle={styles.vehicleCardImg}
                     >
-                      <ImageBackground
-                        source={{ uri: v.image }}
-                        style={styles.vehicleCardBg}
-                        imageStyle={styles.vehicleCardImg}
-                      >
-                        <View style={styles.vehicleCardOverlay}>
-                          <View style={styles.vehicleCardLeft}>
-                            <View>
-                              <Text style={styles.vehicleName}>{v.label}</Text>
-                              <Text style={styles.vehicleDesc}>{v.description}</Text>
-                            </View>
-                          </View>
-                          <View style={styles.vehicleMeta}>
-                            <Text style={styles.vehiclePrice}>{price.toFixed(0)} {CURRENCY}</Text>
-                            <Text style={styles.vehicleEta}>{v.eta_minutes} min</Text>
+                      <View style={styles.vehicleCardOverlay}>
+                        <View style={styles.vehicleCardLeft}>
+                          <View>
+                            <Text style={styles.vehicleName}>{v.label}</Text>
+                            <Text style={styles.vehicleDesc}>{v.description}</Text>
                           </View>
                         </View>
-                      </ImageBackground>
-                    </TouchableOpacity>
-                  );
-                })}
-              </ScrollView>
-              {error ? <Text style={styles.error}>{error}</Text> : null}
-              <TouchableOpacity style={styles.confirmBtn} onPress={() => setShowPayment(true)}>
-                <Text style={styles.confirmBtnText}>Confirma cursa</Text>
-              </TouchableOpacity>
-            </View>
-          )}
-        </>
+                        <View style={styles.vehicleMeta}>
+                          <Text style={styles.vehiclePrice}>{price.toFixed(0)} {CURRENCY}</Text>
+                          <Text style={styles.vehicleEta}>{v.eta_minutes} min</Text>
+                        </View>
+                      </View>
+                    </ImageBackground>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            {error ? <Text style={styles.error}>{error}</Text> : null}
+            <TouchableOpacity style={styles.confirmBtn} onPress={() => setShowPayment(true)}>
+              <Text style={styles.confirmBtnText}>Confirma cursa</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null
       )}
+
+      {/* Bottom navigation bar */}
+      {!selectMode && (
+        <BottomNav active="home" navigation={navigation} onMapPress={centerOnUser} />
+      )}
+
+      {/* Rating modal */}
+      <Modal visible={!!ratingData} transparent animationType="fade" onRequestClose={() => setRatingData(null)}>
+        <View style={styles.ratingOverlay}>
+          <View style={styles.ratingCard}>
+            <Text style={styles.ratingCheck}>✓</Text>
+            <Text style={styles.ratingTitle}>Cursa finalizata!</Text>
+            <Text style={styles.ratingPrice}>{ratingData?.finalPrice.toFixed(2)} {CURRENCY}</Text>
+
+            <View style={styles.ratingDriverRow}>
+              <View style={styles.ratingAvatar}>
+                <Text style={styles.ratingAvatarText}>{ratingData?.driverInitials}</Text>
+              </View>
+              <Text style={styles.ratingDriverName}>{ratingData?.driverName}</Text>
+            </View>
+
+            <Text style={styles.ratingPrompt}>Cum a fost cursa?</Text>
+            <View style={styles.starsRow}>
+              {[1, 2, 3, 4, 5].map((star) => (
+                <TouchableOpacity key={star} onPress={() => setSelectedRating(star)} style={styles.starBtn}>
+                  <Text style={[styles.starIcon, { opacity: star <= selectedRating ? 1 : 0.25 }]}>★</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <TouchableOpacity
+              style={[styles.ratingSubmitBtn, ratingSubmitting && { opacity: 0.6 }]}
+              onPress={submitRating}
+              disabled={ratingSubmitting}
+            >
+              {ratingSubmitting
+                ? <ActivityIndicator color="#fff" />
+                : <Text style={styles.ratingSubmitText}>{selectedRating === 0 ? 'Finalizeaza' : 'Trimite nota'}</Text>
+              }
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -534,7 +667,6 @@ const SHADOW = {
 const styles = StyleSheet.create({
   root: { flex: 1 },
 
-  // Floating panel base
   floatingPanel: {
     position: 'absolute', left: 12, right: 12,
     backgroundColor: '#fff', borderRadius: 20,
@@ -543,6 +675,9 @@ const styles = StyleSheet.create({
   },
   topFloating: { top: 0 },
   bottomFloating: { bottom: 0 },
+
+  // Locked address (during active order)
+  lockedAddress: { flex: 1, fontSize: 14, color: '#111', fontWeight: '500' },
 
   // Sign out
   signOutBtn: {
@@ -554,12 +689,6 @@ const styles = StyleSheet.create({
   signOutText: { fontSize: 13, color: '#555', fontWeight: '600' },
 
   // Locate
-  locateBtn: {
-    position: 'absolute', right: 24,
-    backgroundColor: '#fff', borderRadius: 28, width: 44, height: 44,
-    justifyContent: 'center', alignItems: 'center', ...SHADOW,
-  },
-  locateBtnText: { fontSize: 22, color: '#111' },
 
   // Inputs
   inputRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
@@ -574,38 +703,25 @@ const styles = StyleSheet.create({
   },
   clearBtnText: { fontSize: 11, color: '#555', fontWeight: '700' },
 
-  // Vehicle panel
-  routeInfoText: { fontSize: 13, color: '#555', fontWeight: '500', marginBottom: 10, textAlign: 'center' },
-  sectionLabel: { fontSize: 11, color: '#999', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 },
-  vehicleCard: {
-    borderRadius: 12, overflow: 'hidden',
-    marginBottom: 6, borderWidth: 2, borderColor: 'transparent',
+  // Select mode
+  selectBannerTitle: { fontSize: 13, color: '#888', fontWeight: '600' },
+  selectBannerAddr: { fontSize: 14, color: '#111', marginTop: 4, fontWeight: '500' },
+  selectActions: {
+    position: 'absolute', bottom: 0, left: 12, right: 12,
+    flexDirection: 'row', gap: 12,
   },
-  vehicleCardSelected: { borderColor: '#facc15' },
-  vehicleCardBg: { width: '100%', height: 58 },
-  vehicleCardImg: { borderRadius: 10 },
-  vehicleCardOverlay: {
-    flex: 1, flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'space-between', paddingHorizontal: 14,
-    backgroundColor: 'rgba(0,0,0,0.42)',
+  cancelSelectBtn: {
+    flex: 1, backgroundColor: '#f2f2f2', borderRadius: 14,
+    paddingVertical: 15, alignItems: 'center',
   },
-  vehicleCardLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
-  vehicleSelectedDot: {
-    width: 8, height: 8, borderRadius: 4, backgroundColor: '#fff',
+  cancelSelectText: { fontSize: 15, fontWeight: '600', color: '#555' },
+  confirmSelectBtn: {
+    flex: 2, backgroundColor: '#111', borderRadius: 14,
+    paddingVertical: 15, alignItems: 'center',
   },
-  vehicleName: { fontSize: 14, fontWeight: '700', color: '#fff' },
-  vehicleDesc: { fontSize: 10, color: 'rgba(255,255,255,0.75)', marginTop: 1 },
-  vehicleMeta: { alignItems: 'flex-end' },
-  vehiclePrice: { fontSize: 14, fontWeight: '700', color: '#fff' },
-  vehicleEta: { fontSize: 10, color: 'rgba(255,255,255,0.75)', marginTop: 1 },
-  error: { color: '#e53e3e', fontSize: 13, marginBottom: 8, textAlign: 'center' },
-  confirmBtn: {
-    backgroundColor: '#111', borderRadius: 14, paddingVertical: 14,
-    alignItems: 'center', marginTop: 4,
-  },
-  confirmBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+  confirmSelectText: { fontSize: 15, fontWeight: '700', color: '#fff' },
 
-  // Map selection
+  // Map pin
   pinContainer: {
     position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
     justifyContent: 'center', alignItems: 'center',
@@ -628,51 +744,117 @@ const styles = StyleSheet.create({
     width: 12, height: 5, borderRadius: 6,
     backgroundColor: 'rgba(0,0,0,0.2)', marginTop: 3,
   },
-  selectBannerTitle: { fontSize: 13, color: '#888', fontWeight: '600' },
-  selectBannerAddr: { fontSize: 14, color: '#111', marginTop: 4, fontWeight: '500' },
-  selectActions: {
-    position: 'absolute', bottom: 0, left: 12, right: 12,
-    flexDirection: 'row', gap: 12,
-  },
-  cancelSelectBtn: {
-    flex: 1, backgroundColor: '#f2f2f2', borderRadius: 14,
-    paddingVertical: 15, alignItems: 'center',
-  },
-  cancelSelectText: { fontSize: 15, fontWeight: '600', color: '#555' },
-  confirmSelectBtn: {
-    flex: 2, backgroundColor: '#111', borderRadius: 14,
-    paddingVertical: 15, alignItems: 'center',
-  },
-  confirmSelectText: { fontSize: 15, fontWeight: '700', color: '#fff' },
 
-  // Active order
-  topBar: {
-    position: 'absolute', top: 0, left: 12, right: 12,
-    alignItems: 'center',
+  // Active order — searching
+  searchingRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 4 },
+  searchingText: { fontSize: 16, fontWeight: '700', color: '#111' },
+  searchingSubtext: { fontSize: 13, color: '#888', marginBottom: 14 },
+
+  // Active order — status label
+  orderStatusLabel: {
+    fontSize: 11, fontWeight: '700', color: '#22c55e',
+    textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 12,
   },
-  statusBadge: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 20,
-    paddingHorizontal: 16, paddingVertical: 10, ...SHADOW,
+
+  // Driver card
+  driverCard: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 14 },
+  driverAvatar: {
+    width: 48, height: 48, borderRadius: 24, backgroundColor: '#e0e7ff',
+    alignItems: 'center', justifyContent: 'center',
   },
-  statusBadgeText: { fontSize: 14, fontWeight: '700', color: '#111' },
-  activeRouteRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  activeRouteText: { flex: 1, fontSize: 14, color: '#111', fontWeight: '500' },
-  activeRouteLine: { width: 1, height: 14, backgroundColor: '#ccc', marginLeft: 4, marginVertical: 4 },
-  activeMeta: {
+  driverAvatarText: { fontSize: 17, fontWeight: '700', color: '#4338ca' },
+  driverName: { fontSize: 15, fontWeight: '700', color: '#111' },
+  driverVehicle: { fontSize: 13, color: '#666', marginTop: 2, textTransform: 'capitalize' },
+  ratingBadge: {
+    backgroundColor: '#fefce8', borderRadius: 8,
+    paddingHorizontal: 10, paddingVertical: 5,
+    borderWidth: 1, borderColor: '#fde68a',
+  },
+  ratingText: { fontSize: 13, fontWeight: '700', color: '#92400e' },
+
+  // Plate + price row
+  plateRow: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
-    marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: '#f0f0f0',
+    paddingTop: 12, borderTopWidth: 1, borderTopColor: '#f0f0f0',
   },
-  activePrice: { fontSize: 22, fontWeight: '800', color: '#111' },
+  plateText: { fontSize: 15, fontWeight: '700', color: '#111', fontFamily: 'monospace', letterSpacing: 2 },
+  priceRightRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+
+  // Price + cash
+  priceRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    marginBottom: 12,
+  },
+  activePrice: { fontSize: 20, fontWeight: '800', color: '#111' },
   cashBadge: {
     backgroundColor: '#fefce8', borderRadius: 8,
     paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: '#fde68a',
   },
   cashBadgeText: { fontSize: 13, fontWeight: '600', color: '#92400e' },
+
+  // Cancel button
   cancelBtn: {
     backgroundColor: '#fef2f2', borderRadius: 12,
     paddingVertical: 13, alignItems: 'center',
-    marginTop: 12, borderWidth: 1, borderColor: '#fecaca',
+    borderWidth: 1, borderColor: '#fecaca',
   },
   cancelBtnText: { fontSize: 15, color: '#ef4444', fontWeight: '600' },
+
+  // Vehicle panel
+  routeInfoText: { fontSize: 13, color: '#555', fontWeight: '500', marginBottom: 10, textAlign: 'center' },
+  sectionLabel: { fontSize: 11, color: '#999', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 },
+  vehicleCard: {
+    borderRadius: 12, overflow: 'hidden',
+    marginBottom: 6, borderWidth: 2, borderColor: 'transparent',
+  },
+  vehicleCardSelected: { borderColor: '#facc15' },
+  vehicleCardBg: { width: '100%', height: 58 },
+  vehicleCardImg: { borderRadius: 10 },
+  vehicleCardOverlay: {
+    flex: 1, flexDirection: 'row', alignItems: 'center',
+    justifyContent: 'space-between', paddingHorizontal: 14,
+    backgroundColor: 'rgba(0,0,0,0.42)',
+  },
+  vehicleCardLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  vehicleName: { fontSize: 14, fontWeight: '700', color: '#fff' },
+  vehicleDesc: { fontSize: 10, color: 'rgba(255,255,255,0.75)', marginTop: 1 },
+  vehicleMeta: { alignItems: 'flex-end' },
+  vehiclePrice: { fontSize: 14, fontWeight: '700', color: '#fff' },
+  vehicleEta: { fontSize: 10, color: 'rgba(255,255,255,0.75)', marginTop: 1 },
+  error: { color: '#e53e3e', fontSize: 13, marginBottom: 8, textAlign: 'center' },
+  confirmBtn: {
+    backgroundColor: '#111', borderRadius: 14, paddingVertical: 14,
+    alignItems: 'center', marginTop: 4,
+  },
+  confirmBtnText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+
+  // Rating modal
+  ratingOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.55)',
+    justifyContent: 'center', alignItems: 'center', padding: 28,
+  },
+  ratingCard: {
+    backgroundColor: '#fff', borderRadius: 24, padding: 28,
+    width: '100%', alignItems: 'center', ...SHADOW,
+  },
+  ratingCheck: { fontSize: 48, color: '#22c55e', marginBottom: 8 },
+  ratingTitle: { fontSize: 20, fontWeight: '800', color: '#111', marginBottom: 4 },
+  ratingPrice: { fontSize: 28, fontWeight: '800', color: '#111', marginBottom: 20 },
+  ratingDriverRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 20 },
+  ratingAvatar: {
+    width: 44, height: 44, borderRadius: 22, backgroundColor: '#e0e7ff',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  ratingAvatarText: { fontSize: 15, fontWeight: '700', color: '#4338ca' },
+  ratingDriverName: { fontSize: 15, fontWeight: '600', color: '#111' },
+  ratingPrompt: { fontSize: 14, color: '#888', marginBottom: 12 },
+  starsRow: { flexDirection: 'row', gap: 8, marginBottom: 24 },
+  starBtn: { padding: 4 },
+  starIcon: { fontSize: 40, color: '#facc15' },
+  ratingSubmitBtn: {
+    backgroundColor: '#111', borderRadius: 14, paddingVertical: 14,
+    alignItems: 'center', width: '100%', marginBottom: 10,
+  },
+  ratingSubmitText: { color: '#fff', fontWeight: '700', fontSize: 16 },
+
 });

@@ -4,6 +4,7 @@ import type { Order, VehicleType, Address } from '@rideshare/shared';
 
 export function useOrders(customerId: string | undefined) {
   const [activeOrder, setActiveOrder] = useState<Order | null>(null);
+  const [completedOrder, setCompletedOrder] = useState<Order | null>(null);
   const [orderHistory, setOrderHistory] = useState<Order[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -39,6 +40,9 @@ export function useOrders(customerId: string | undefined) {
           const updated = payload.new as Order;
           if (['pending', 'accepted', 'arriving', 'in_progress'].includes(updated.status)) {
             setActiveOrder(updated);
+          } else if (updated.status === 'completed') {
+            setCompletedOrder(updated);
+            setActiveOrder(null);
           } else {
             setActiveOrder(null);
           }
@@ -100,5 +104,7 @@ export function useOrders(customerId: string | undefined) {
     setOrderHistory(data ?? []);
   };
 
-  return { activeOrder, orderHistory, loading, requestRide, cancelOrder, fetchHistory };
+  const dismissCompletedOrder = () => setCompletedOrder(null);
+
+  return { activeOrder, completedOrder, dismissCompletedOrder, orderHistory, loading, requestRide, cancelOrder, fetchHistory };
 }

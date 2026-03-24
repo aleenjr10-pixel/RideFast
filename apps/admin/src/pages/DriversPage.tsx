@@ -76,7 +76,8 @@ export default function DriversPage() {
 
   const approve = async (driver: Driver) => {
     setProcessing(driver.id);
-    await supabase.from('drivers').update({ approved: true }).eq('id', driver.id);
+    const { error } = await supabase.from('drivers').update({ approved: true }).eq('id', driver.id);
+    if (error) { alert(`Eroare la aprobare: ${error.message}`); setProcessing(null); return; }
     setDrivers((prev) => prev.filter((d) => d.id !== driver.id));
     setProcessing(null);
   };
@@ -84,7 +85,8 @@ export default function DriversPage() {
   const reject = async (driver: Driver) => {
     if (!confirm(`Respingi contul lui ${driver.full_name}?`)) return;
     setProcessing(driver.id);
-    await supabase.from('drivers').delete().eq('id', driver.id);
+    const { error } = await supabase.from('drivers').delete().eq('id', driver.id);
+    if (error) { alert(`Eroare la respingere: ${error.message}`); setProcessing(null); return; }
     setDrivers((prev) => prev.filter((d) => d.id !== driver.id));
     setProcessing(null);
   };

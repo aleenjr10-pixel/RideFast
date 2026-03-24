@@ -14,6 +14,7 @@ interface Props {
   driverName: string;
   driverStatus: string;
   onProfile: () => void;
+  onTrips: () => void;
   onSignOut: () => void;
 }
 
@@ -23,7 +24,7 @@ const STATUS_LABELS: Record<string, { label: string; color: string }> = {
   in_ride: { label: 'In cursa', color: '#3b82f6' },
 };
 
-export default function Drawer({ visible, onClose, driverName, driverStatus, onProfile, onSignOut }: Props) {
+export default function Drawer({ visible, onClose, driverName, driverStatus, onProfile, onTrips, onSignOut }: Props) {
   const insets = useSafeAreaInsets();
   const translateX = useRef(new Animated.Value(-DRAWER_WIDTH)).current;
   const overlayOpacity = useRef(new Animated.Value(0)).current;
@@ -83,6 +84,11 @@ export default function Drawer({ visible, onClose, driverName, driverStatus, onP
         <TouchableOpacity style={styles.navItem} onPress={() => { onClose(); setTimeout(onProfile, 250); }}>
           <Text style={styles.navIcon}>👤</Text>
           <Text style={styles.navLabel}>Profil</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.navItem} onPress={() => { onClose(); setTimeout(onTrips, 250); }}>
+          <Text style={styles.navIcon}>📋</Text>
+          <Text style={styles.navLabel}>Cursele mele</Text>
         </TouchableOpacity>
 
         {/* Sign out */}

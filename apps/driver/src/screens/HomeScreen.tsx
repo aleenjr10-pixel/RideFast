@@ -203,6 +203,7 @@ export default function HomeScreen({ navigation }: any) {
         driverName={session?.user.user_metadata?.full_name ?? ''}
         driverStatus={status}
         onProfile={() => navigation.navigate('Profile')}
+        onTrips={() => navigation.navigate('Trips')}
         onSignOut={signOut}
       />
 
